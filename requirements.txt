@@ -1,0 +1,6 @@
+python-telegram-bot==20.6
+aioimaplib==0.5.1
+aiosqlite==0.18.0
+python-dotenv==1.0.1
+cryptography==40.0.2
+email-validator==2.0.0
