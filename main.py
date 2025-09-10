@@ -20,15 +20,15 @@ FERNET_KEY = os.getenv("FERNET_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")
+RAILWAY_URL = os.getenv("https://web-production-e2816.up.railway.app")  # e.g. https://worker-production-xxxx.up.railway.app
 
-if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI:
-    raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY and OAUTH_REDIRECT_URI in env vars")
+if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not RAILWAY_URL:
+    raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY, OAUTH_REDIRECT_URI, and RAILWAY_URL in env vars")
 
 fernet = get_fernet_from_env(FERNET_KEY)
 gmail_handler = GmailHandler(fernet=fernet, poll_interval=POLL_INTERVAL)
-bg_tasks = {}  # background tasks per user
+bg_tasks = {}
 
-# Conversation states
 WAIT_TOKEN = 0
 
 # ---------------- Commands ---------------- #
@@ -59,7 +59,6 @@ async def paste_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🚪 Logout Gmail", callback_data="logout")]
         ])
     )
-    # start background poller
     if user_id not in bg_tasks:
         loop = asyncio.get_event_loop()
         task = loop.create_task(gmail_handler.poll_user_emails(user_id))
@@ -120,12 +119,17 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(callback_handler))
-    # Init DB
+
     loop = asyncio.get_event_loop()
     loop.run_until_complete(init_db())
 
-    print("Bot started")
-    app.run_polling()
+    print("Bot started with webhook")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 8080)),
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=f"{RAILWAY_URL}/{TELEGRAM_TOKEN}"
+    )
 
 if __name__ == "__main__":
     main()
