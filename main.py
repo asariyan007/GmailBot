@@ -174,4 +174,4 @@ def main():
     print("Bot started")
     app.run_polling()
 if __name__ == "__main__":
-    main(
+    main()
