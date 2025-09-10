@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("8132221861:AAEKFg3CUUESr8Pc5jHiqhC09rXZAOFhSxU")
-FERNET_KEY = os.getenv("8L4ibXdwQYd7vQh_1Vm69sVv-sRXqQdB2hTQ1kXfN0w=")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+FERNET_KEY = os.getenv("FERNET_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
 
