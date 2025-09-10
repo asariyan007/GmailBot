@@ -2,8 +2,12 @@
 import os
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler, ConversationHandler
-from database import init_db, save_user, get_user, add_alias, get_latest_alias
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes,
+    MessageHandler, filters, CallbackQueryHandler, ConversationHandler
+)
+from database import init_db, save_user, get_user, add_alias, get_latest_alias, remove_user
+from gmail_oauth import generate_oauth_link, exchange_code_for_tokens
 from gmail_handler import GmailHandler
 from utils import get_fernet_from_env, now_ts
 from cryptography.fernet import Fernet
@@ -15,147 +19,110 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FERNET_KEY = os.getenv("FERNET_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
+OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")
 
-if not TELEGRAM_TOKEN or not FERNET_KEY:
-    raise RuntimeError("Please set TELEGRAM_TOKEN and FERNET_KEY in env vars")
+if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI:
+    raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY and OAUTH_REDIRECT_URI in env vars")
 
 fernet = get_fernet_from_env(FERNET_KEY)
-
-# conversation states
-ASK_EMAIL, ASK_PASSWORD = range(2)
-
 gmail_handler = GmailHandler(fernet=fernet, poll_interval=POLL_INTERVAL)
+bg_tasks = {}  # background tasks per user
 
-# keep track of background tasks per user
-bg_tasks = {}
+# Conversation states
+WAIT_TOKEN = 0
 
+# ---------------- Commands ---------------- #
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🔐 Login", callback_data="login")]]
-    await update.message.reply_text("Welcome. Use Login to store your Gmail (App password recommended).", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def login_button_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("Send your Gmail address (e.g. example@gmail.com):")
-    return ASK_EMAIL
-
-async def ask_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    email = update.message.text.strip()
-    context.user_data['tmp_email'] = email
-    await update.message.reply_text("Now send the App Password (16-character Gmail App Password). It will be stored encrypted.")
-    return ASK_PASSWORD
-
-async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pw = update.message.text.strip()
-    email = context.user_data.get('tmp_email')
-    if not email:
-        await update.message.reply_text("Email missing. Send /start and try again.")
-        return ConversationHandler.END
-    # encrypt password
-    enc_pw = fernet.encrypt(pw.encode()).decode()
-    tg_id = update.message.from_user.id
-    await save_user(tg_id, email, enc_pw)
-    await update.message.reply_text("Login stored successfully! You can now /generate alias.")
-    # start background IMAP poller if not running
-    if tg_id not in bg_tasks:
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(run_user_poll(tg_id))
-        bg_tasks[tg_id] = task
-    return ConversationHandler.END
-
-async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled.")
-    return ConversationHandler.END
-
-async def generate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tg_id = update.message.from_user.id
-    user = await get_user(tg_id)
-    if not user:
-        await update.message.reply_text("You are not logged in. Use /start and Login first.")
-        return
-    base_email = user['email']
-    alias = gmail_handler.gen_alias(base_email, n=ALIAS_RANDOM_LEN)
-    ts = now_ts()
-    await add_alias(tg_id, alias, ts)
     keyboard = [
-        [InlineKeyboardButton("📋 Copy (send in chat)", callback_data=f"copy|{alias}")],
-        [InlineKeyboardButton("🔁 Change Mail", callback_data=f"change|{alias}")]
+        [InlineKeyboardButton("🔐 Connect Gmail", url=generate_oauth_link(update.message.from_user.id, OAUTH_REDIRECT_URI))]
     ]
-    await update.message.reply_text(f"Generated alias:\n`{alias}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-    if tg_id not in bg_tasks:
-        loop = asyncio.get_event_loop()
-        task = loop.create_task(run_user_poll(tg_id))
-        bg_tasks[tg_id] = task
+    await update.message.reply_text(
+        "Welcome! Connect your Gmail to generate temp emails and receive OTPs automatically.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def paste_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    token_code = update.message.text.strip()
+    try:
+        access_token, refresh_token, email = await exchange_code_for_tokens(token_code)
+    except Exception as e:
+        await update.message.reply_text(f"Failed to validate token: {e}")
+        return ConversationHandler.END
+    enc_access = fernet.encrypt(access_token.encode()).decode()
+    enc_refresh = fernet.encrypt(refresh_token.encode()).decode()
+    await save_user(user_id, email, enc_access, enc_refresh)
+    await update.message.reply_text(
+        f"Gmail {email} connected successfully!\n\nInline buttons:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🆕 Generate Temp Mail", callback_data="generate")],
+            [InlineKeyboardButton("🚪 Logout Gmail", callback_data="logout")]
+        ])
+    )
+    # start background poller
+    if user_id not in bg_tasks:
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(gmail_handler.poll_user_emails(user_id))
+        bg_tasks[user_id] = task
+    return ConversationHandler.END
+
+# ---------------- Callback Queries ---------------- #
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    if data.startswith("copy|"):
-        alias = data.split("|",1)[1]
-        await query.message.reply_text(f"`{alias}`", parse_mode="Markdown")
-    elif data.startswith("change|"):
-        tg_id = query.from_user.id
-        user = await get_user(tg_id)
+    user_id = query.from_user.id
+
+    if data == "generate":
+        user = await get_user(user_id)
         if not user:
-            await query.message.reply_text("Not logged in.")
+            await query.message.reply_text("Please login first using /start.")
             return
         alias = gmail_handler.gen_alias(user['email'], n=ALIAS_RANDOM_LEN)
-        await add_alias(tg_id, alias, now_ts())
+        ts = now_ts()
+        await add_alias(user_id, alias, ts)
         keyboard = [
-            [InlineKeyboardButton("📋 Copy (send in chat)", callback_data=f"copy|{alias}")],
-            [InlineKeyboardButton("🔁 Change Mail", callback_data=f"change|{alias}")]
+            [InlineKeyboardButton("📋 Copy", callback_data=f"copy|{alias}")],
+            [InlineKeyboardButton("🔁 Change", callback_data=f"change|{alias}")]
         ]
-        await query.message.reply_text(f"New alias:\n`{alias}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.reply_text(f"Generated temp email:\n`{alias}`",
+                                       parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def run_user_poll(tg_id: int):
-    await asyncio.sleep(1)
-    user = await get_user(tg_id)
-    if not user:
-        return
-    enc_pw = user['enc_password']
-    try:
-        app_pw = fernet.decrypt(enc_pw.encode()).decode()
-    except Exception:
-        return
-    email_addr = user['email']
-    from telegram import Bot
-    bot = Bot(token=TELEGRAM_TOKEN)
-    await gmail_handler.fetch_and_process(tg_id, email_addr, app_pw, bot)
+    elif data.startswith("copy|"):
+        alias = data.split("|")[1]
+        await query.message.reply_text(f"`{alias}`", parse_mode="Markdown")
 
-async def on_startup(app):
-    await init_db()
-    import aiosqlite
-    async with aiosqlite.connect("bot_data.sqlite3") as db:
-        cur = await db.execute("SELECT tg_id FROM users")
-        rows = await cur.fetchall()
-        loop = asyncio.get_event_loop()
-        for r in rows:
-            tg = r[0]
-            if tg not in bg_tasks:
-                task = loop.create_task(run_user_poll(tg))
-                bg_tasks[tg] = task
+    elif data.startswith("change|"):
+        user = await get_user(user_id)
+        alias = gmail_handler.gen_alias(user['email'], n=ALIAS_RANDOM_LEN)
+        await add_alias(user_id, alias, now_ts())
+        keyboard = [
+            [InlineKeyboardButton("📋 Copy", callback_data=f"copy|{alias}")],
+            [InlineKeyboardButton("🔁 Change", callback_data=f"change|{alias}")]
+        ]
+        await query.message.reply_text(f"New temp email:\n`{alias}`",
+                                       parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
+    elif data == "logout":
+        await remove_user(user_id)
+        await query.message.reply_text("Logged out successfully! Use /start to login again.")
+
+# ---------------- Main ---------------- #
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(login_button_cb, pattern="^login$")],
-        states={
-            ASK_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_email)],
-            ASK_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_password)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_conv)]
+        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)],
+        states={WAIT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)]},
+        fallbacks=[]
     )
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(conv)
-    app.add_handler(CommandHandler("generate", generate_cmd))
-    app.add_handler(CallbackQueryHandler(callback_query_handler))
-
-    # PTB v20+ compatible startup
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    # Init DB
     loop = asyncio.get_event_loop()
-    loop.create_task(on_startup(app))
+    loop.run_until_complete(init_db())
 
     print("Bot started")
     app.run_polling()
