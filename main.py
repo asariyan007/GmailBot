@@ -58,7 +58,6 @@ async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Login stored successfully! You can now /generate alias.")
     # start background IMAP poller if not running
     if tg_id not in bg_tasks:
-        # create task
         loop = asyncio.get_event_loop()
         task = loop.create_task(run_user_poll(tg_id))
         bg_tasks[tg_id] = task
@@ -75,17 +74,14 @@ async def generate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("You are not logged in. Use /start and Login first.")
         return
     base_email = user['email']
-    # generate alias
     alias = gmail_handler.gen_alias(base_email, n=ALIAS_RANDOM_LEN)
     ts = now_ts()
     await add_alias(tg_id, alias, ts)
-    # keyboard with Copy and Change
     keyboard = [
         [InlineKeyboardButton("📋 Copy (send in chat)", callback_data=f"copy|{alias}")],
         [InlineKeyboardButton("🔁 Change Mail", callback_data=f"change|{alias}")]
     ]
     await update.message.reply_text(f"Generated alias:\n`{alias}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-    # ensure background poller running
     if tg_id not in bg_tasks:
         loop = asyncio.get_event_loop()
         task = loop.create_task(run_user_poll(tg_id))
@@ -97,10 +93,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
     if data.startswith("copy|"):
         alias = data.split("|",1)[1]
-        # send alias plainly so user can copy
         await query.message.reply_text(f"`{alias}`", parse_mode="Markdown")
     elif data.startswith("change|"):
-        # simply generate a new one
         tg_id = query.from_user.id
         user = await get_user(tg_id)
         if not user:
@@ -115,13 +109,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text(f"New alias:\n`{alias}`", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def run_user_poll(tg_id: int):
-    """
-    Ensure db init done before calling.
-    This coroutine will try to pull user's stored password and keep a polling loop via gmail_handler.
-    """
-    # small delay to let bot start
     await asyncio.sleep(1)
-    from database import get_user
     user = await get_user(tg_id)
     if not user:
         return
@@ -131,16 +119,12 @@ async def run_user_poll(tg_id: int):
     except Exception:
         return
     email_addr = user['email']
-    # pass a lightweight bot-like object to gmail_handler for sending messages
     from telegram import Bot
     bot = Bot(token=TELEGRAM_TOKEN)
     await gmail_handler.fetch_and_process(tg_id, email_addr, app_pw, bot)
 
 async def on_startup(app):
-    # init db
     await init_db()
-    # start background pollers for already-logged users (if running from persistent filesystem)
-    # optionally: query all users and start pollers
     import aiosqlite
     async with aiosqlite.connect("bot_data.sqlite3") as db:
         cur = await db.execute("SELECT tg_id FROM users")
@@ -168,10 +152,13 @@ def main():
     app.add_handler(conv)
     app.add_handler(CommandHandler("generate", generate_cmd))
     app.add_handler(CallbackQueryHandler(callback_query_handler))
-    # run startup
-    app.post_init.append(on_startup)
+
+    # PTB v20+ compatible startup
+    loop = asyncio.get_event_loop()
+    loop.create_task(on_startup(app))
 
     print("Bot started")
     app.run_polling()
+
 if __name__ == "__main__":
     main()
