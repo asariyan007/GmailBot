@@ -19,11 +19,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FERNET_KEY = os.getenv("FERNET_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
-OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")
-RAILWAY_URL = os.getenv("https://web-production-e2816.up.railway.app")  # e.g. https://worker-production-xxxx.up.railway.app
+OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")   # must include https://
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")                # railway root domain
 
-if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not RAILWAY_URL:
-    raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY, OAUTH_REDIRECT_URI, and RAILWAY_URL in env vars")
+if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not WEBHOOK_URL:
+    raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY, OAUTH_REDIRECT_URI, and WEBHOOK_URL in env vars")
 
 fernet = get_fernet_from_env(FERNET_KEY)
 gmail_handler = GmailHandler(fernet=fernet, poll_interval=POLL_INTERVAL)
@@ -128,7 +128,7 @@ def main():
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 8080)),
         url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{RAILWAY_URL}/{TELEGRAM_TOKEN}"
+        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
     )
 
 if __name__ == "__main__":
