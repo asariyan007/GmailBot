@@ -60,7 +60,7 @@ async def paste_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
     if user_id not in bg_tasks:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task = loop.create_task(gmail_handler.poll_user_emails(user_id))
         bg_tasks[user_id] = task
     return ConversationHandler.END
@@ -120,7 +120,8 @@ def main():
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.run_until_complete(init_db())
 
     print("Bot started with webhook")
