@@ -13,7 +13,6 @@ from database import init_db, save_user, get_user, add_alias, remove_user
 from gmail_oauth import generate_oauth_link, exchange_code_for_tokens
 from gmail_handler import GmailHandler
 from utils import get_fernet_from_env, now_ts
-from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,8 +21,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FERNET_KEY = os.getenv("FERNET_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
-OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")   # must include https://
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")                # railway root domain
+OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # railway root domain (https://xxx.up.railway.app)
 PORT = int(os.getenv("PORT", 8000))
 
 if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not WEBHOOK_URL:
@@ -52,9 +51,11 @@ async def paste_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Failed to validate token: {e}")
         return ConversationHandler.END
+
     enc_access = fernet.encrypt(access_token.encode()).decode()
     enc_refresh = fernet.encrypt(refresh_token.encode()).decode()
     await save_user(user_id, email, enc_access, enc_refresh)
+
     await update.message.reply_text(
         f"Gmail {email} connected successfully!\n\nInline buttons:",
         reply_markup=InlineKeyboardMarkup([
@@ -62,10 +63,12 @@ async def paste_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🚪 Logout Gmail", callback_data="logout")]
         ])
     )
+
     if user_id not in bg_tasks:
         loop = asyncio.get_running_loop()
         task = loop.create_task(gmail_handler.poll_user_emails(user_id))
         bg_tasks[user_id] = task
+
     return ConversationHandler.END
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,23 +127,25 @@ telegram_app.add_handler(CallbackQueryHandler(callback_handler))
 # ---------------- FastAPI (with lifespan) ---------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     await init_db()
     await telegram_app.initialize()
-    asyncio.create_task(telegram_app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
-    ))
+    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
     print(f"🚀 Bot started with webhook at {WEBHOOK_URL}/{TELEGRAM_TOKEN}")
     yield
-    # Shutdown
     await telegram_app.stop()
     await telegram_app.shutdown()
 
 fastapi_app = FastAPI(lifespan=lifespan)
 
+# Telegram webhook endpoint
+@fastapi_app.post(f"/{TELEGRAM_TOKEN}")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"status": "ok"}
+
+# Gmail OAuth callback
 @fastapi_app.get("/oauth/callback")
 async def oauth_callback(request: Request):
     params = request.query_params
