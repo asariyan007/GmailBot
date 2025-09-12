@@ -7,7 +7,8 @@ from telegram.ext import (
     MessageHandler, filters, CallbackQueryHandler, ConversationHandler
 )
 from fastapi import FastAPI, Request
-from telegram.ext import Application
+from contextlib import asynccontextmanager
+
 from database import init_db, save_user, get_user, add_alias, remove_user
 from gmail_oauth import generate_oauth_link, exchange_code_for_tokens
 from gmail_handler import GmailHandler
@@ -30,7 +31,6 @@ if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not WEBHOOK
 fernet = get_fernet_from_env(FERNET_KEY)
 gmail_handler = GmailHandler(fernet=fernet, poll_interval=POLL_INTERVAL)
 bg_tasks = {}
-
 WAIT_TOKEN = 0
 
 # ---------------- Telegram Bot ---------------- #
@@ -107,8 +107,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await remove_user(user_id)
         await query.message.reply_text("Logged out successfully! Use /start to login again.")
 
-# ---------------- FastAPI ---------------- #
-fastapi_app = FastAPI()
+# ---------------- Init Telegram App ---------------- #
+telegram_app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+conv = ConversationHandler(
+    entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)],
+    states={WAIT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)]},
+    fallbacks=[]
+)
+
+telegram_app.add_handler(CommandHandler("start", start_cmd))
+telegram_app.add_handler(conv)
+telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+
+# ---------------- FastAPI (with lifespan) ---------------- #
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await init_db()
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
+    print("🚀 Bot started with webhook")
+
+    yield
+
+    # Shutdown
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+
+fastapi_app = FastAPI(lifespan=lifespan)
 
 @fastapi_app.get("/oauth/callback")
 async def oauth_callback(request: Request):
@@ -123,32 +151,3 @@ async def oauth_callback(request: Request):
         return {"status": "ok", "email": email}
     except Exception as e:
         return {"error": str(e)}
-
-# ---------------- Init Telegram App ---------------- #
-telegram_app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-conv = ConversationHandler(
-    entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)],
-    states={WAIT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)]},
-    fallbacks=[]
-)
-
-telegram_app.add_handler(CommandHandler("start", start_cmd))
-telegram_app.add_handler(conv)
-telegram_app.add_handler(CallbackQueryHandler(callback_handler))
-
-async def on_startup():
-    await init_db()
-    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
-    print("🚀 Bot started with webhook")
-
-@fastapi_app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(telegram_app.initialize())
-    asyncio.create_task(telegram_app.start())
-    await on_startup()
-
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    await telegram_app.stop()
-    await telegram_app.shutdown()
