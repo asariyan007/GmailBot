@@ -17,23 +17,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------------- Config ---------------- #
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 FERNET_KEY = os.getenv("FERNET_KEY")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # railway root domain (https://xxx.up.railway.app)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # e.g. https://xxx.up.railway.app
 PORT = int(os.getenv("PORT", 8000))
 
 if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not WEBHOOK_URL:
-    raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY, OAUTH_REDIRECT_URI, and WEBHOOK_URL in env vars")
+    raise RuntimeError("❌ Please set TELEGRAM_TOKEN, FERNET_KEY, OAUTH_REDIRECT_URI, and WEBHOOK_URL in env vars")
 
 fernet = get_fernet_from_env(FERNET_KEY)
 gmail_handler = GmailHandler(fernet=fernet, poll_interval=POLL_INTERVAL)
 bg_tasks = {}
 WAIT_TOKEN = 0
 
-# ---------------- Telegram Bot ---------------- #
+# ---------------- Handlers ---------------- #
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔐 Connect Gmail", url=generate_oauth_link(update.message.from_user.id, OAUTH_REDIRECT_URI))]
@@ -64,6 +65,7 @@ async def paste_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
+    # background polling
     if user_id not in bg_tasks:
         loop = asyncio.get_running_loop()
         task = loop.create_task(gmail_handler.poll_user_emails(user_id))
@@ -129,6 +131,7 @@ telegram_app.add_handler(CallbackQueryHandler(callback_handler))
 async def lifespan(app: FastAPI):
     await init_db()
     await telegram_app.initialize()
+    # webhook set (token included in path)
     await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
     print(f"🚀 Bot started with webhook at {WEBHOOK_URL}/{TELEGRAM_TOKEN}")
     yield
