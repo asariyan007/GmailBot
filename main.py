@@ -24,6 +24,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL") or 5)
 ALIAS_RANDOM_LEN = int(os.getenv("ALIAS_RANDOM_LEN") or 6)
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")   # must include https://
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")                # railway root domain
+PORT = int(os.getenv("PORT", 8000))
 
 if not TELEGRAM_TOKEN or not FERNET_KEY or not OAUTH_REDIRECT_URI or not WEBHOOK_URL:
     raise RuntimeError("Please set TELEGRAM_TOKEN, FERNET_KEY, OAUTH_REDIRECT_URI, and WEBHOOK_URL in env vars")
@@ -126,12 +127,14 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
-    print("🚀 Bot started with webhook")
-
+    asyncio.create_task(telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}",
+    ))
+    print(f"🚀 Bot started with webhook at {WEBHOOK_URL}/{TELEGRAM_TOKEN}")
     yield
-
     # Shutdown
     await telegram_app.stop()
     await telegram_app.shutdown()
