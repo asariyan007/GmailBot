@@ -3,13 +3,12 @@ import os
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes,
+    Application, ApplicationBuilder, CommandHandler, ContextTypes,
     MessageHandler, filters, CallbackQueryHandler, ConversationHandler
 )
 from fastapi import FastAPI, Request
-import uvicorn
-
-from database import init_db, save_user, get_user, add_alias, get_latest_alias, remove_user
+from telegram.ext import Application
+from database import init_db, save_user, get_user, add_alias, remove_user
 from gmail_oauth import generate_oauth_link, exchange_code_for_tokens
 from gmail_handler import GmailHandler
 from utils import get_fernet_from_env, now_ts
@@ -108,54 +107,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await remove_user(user_id)
         await query.message.reply_text("Logged out successfully! Use /start to login again.")
 
-# ---------------- FastAPI for OAuth ---------------- #
-app = FastAPI()
+# ---------------- FastAPI ---------------- #
+fastapi_app = FastAPI()
 
-@app.get("/oauth/callback")
+@fastapi_app.get("/oauth/callback")
 async def oauth_callback(request: Request):
     params = request.query_params
     code = params.get("code")
-    state = params.get("state")
     if not code:
         return {"error": "No code in callback"}
     try:
-        # Normally you’d store state=user_id mapping to know which Telegram user this belongs to
         access_token, refresh_token, email = await exchange_code_for_tokens(code)
         enc_access = fernet.encrypt(access_token.encode()).decode()
         enc_refresh = fernet.encrypt(refresh_token.encode()).decode()
-        # For now just return success JSON
         return {"status": "ok", "email": email}
     except Exception as e:
         return {"error": str(e)}
 
-# ---------------- Main ---------------- #
-def main():
-    tg_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+# ---------------- Init Telegram App ---------------- #
+telegram_app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)],
-        states={WAIT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)]},
-        fallbacks=[]
-    )
+conv = ConversationHandler(
+    entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)],
+    states={WAIT_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, paste_token)]},
+    fallbacks=[]
+)
 
-    tg_app.add_handler(CommandHandler("start", start_cmd))
-    tg_app.add_handler(conv)
-    tg_app.add_handler(CallbackQueryHandler(callback_handler))
+telegram_app.add_handler(CommandHandler("start", start_cmd))
+telegram_app.add_handler(conv)
+telegram_app.add_handler(CallbackQueryHandler(callback_handler))
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_db())
+async def on_startup():
+    await init_db()
+    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}")
+    print("🚀 Bot started with webhook")
 
-    # Run Telegram webhook in background
-    tg_app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 8080)),
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_TOKEN}"
-    )
+@fastapi_app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(telegram_app.initialize())
+    asyncio.create_task(telegram_app.start())
+    await on_startup()
 
-if __name__ == "__main__":
-    # Run both FastAPI + Telegram bot
-    import threading
-    threading.Thread(target=main, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+@fastapi_app.on_event("shutdown")
+async def shutdown_event():
+    await telegram_app.stop()
+    await telegram_app.shutdown()
